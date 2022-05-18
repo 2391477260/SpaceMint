@@ -78,6 +78,10 @@ func (bc *BlockChain) Read(i int) (*Block, error) {
 		return nil, errors.New("Couldn't read the whole block from chain.")
 	}
 	b := new(Block)
-	err = b.UnmarshalBinary(bin)
-	return b, err
+	if len(bin) == 0 {
+		return b, nil
+	} else {
+		err = b.UnmarshalBinary(bin)
+		return b, err
+	}
 }

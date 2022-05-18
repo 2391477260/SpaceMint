@@ -16,6 +16,7 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -26,8 +27,7 @@ type Client struct {
 	t    time.Duration    // how soon we add a block
 	dist int              // how far to look back for challenge
 
-	//10个解
-	sols []*block.PoS // others' blocks
+	//sols []block.PoS // others' blocks
 
 	//pos params
 	index    int64
@@ -38,7 +38,10 @@ type Client struct {
 	Blockchain  *block.BlockChain
 	myAddr      *net.UDPAddr
 	ClientsAddr []net.UDPAddr
+	MessageNums int
 }
+
+var lock sync.Mutex //互斥锁
 
 //新建客户端
 func NewClient(t time.Duration, dist, beta int, index int64, graph string, addr *net.UDPAddr) *Client {
@@ -75,7 +78,7 @@ func NewClient(t time.Duration, dist, beta int, index int64, graph string, addr 
 func (c *Client) ReceiveData(listen *net.UDPConn) {
 	for {
 		fmt.Println("正在监听端口：", listen.LocalAddr())
-		var recData [1024]byte
+		var recData [1000 * 1024]byte
 		n, addr, err := listen.ReadFromUDP(recData[:])
 		if err != nil {
 			fmt.Println("从udp读取失败,错误为", err)
@@ -90,30 +93,21 @@ func (c *Client) ReceiveData(listen *net.UDPConn) {
 		}
 		fmt.Println("发送方操作：", recMessage.Explain)
 		switch recMessage.Flag {
-		case 1: //别的节点发来更新区块链信息
+		case 1: //别的节点发来更新区块链信息，发送区块链信息给别的节点
 			{
 				bufferLength, buffer := c.ReadFromChain()
-				sendMessage := message.NewMessage(2, "区块链信息", nil, buffer, bufferLength, c.Blockchain)
-				sendData, err := json.Marshal(sendMessage) //类转为json
-				if err != nil {
-					fmt.Println(err)
-					return
-				}
-				fmt.Println("我的区块链信息为：", sendData)
-				fmt.Println("区块信息发送目标地址", addr)
-				_, err = listen.WriteToUDP(sendData, addr)
-				if err != nil {
-					fmt.Println("发送消息失败，错误为", err)
-				}
+				sendMessage := message.NewMessage(2, "区块链信息", *new(block.PoS), buffer, bufferLength, c.Blockchain)
+				c.SendToNode(sendMessage, listen, addr)
 				break
 			}
 		case 2: //接受别的节点发送来的区块链信息，更新自己的区块链
 			{
 				bufferLength, _ := c.ReadFromChain()
+				fmt.Println("进来了")
 				if recMessage.ChainBufferLength >= bufferLength { //更新本地区块链
 					FileInfo, err := c.Blockchain.Chain.Stat()
 					filename := FileInfo.Name()
-					err = os.Remove(filename)
+					err = c.Blockchain.Chain.Truncate(0)
 					if err != nil {
 						return
 					}
@@ -129,17 +123,55 @@ func (c *Client) ReceiveData(listen *net.UDPConn) {
 					c.Blockchain.LastBlock = recMessage.Blockchain.LastBlock
 					c.Blockchain.SetSeekIndex(recMessage.Blockchain.SeekIndex())
 					fmt.Println("更新成功")
+					break
 				} else {
 					fmt.Println("无需更新")
+					break
 				}
 			}
+		case 3: //别的点添加的区块，验证成功后上链
+			{
+				/*				flag := c.ReturnMinQuality()
+								c.MessageNums++
+								if recMessage.SendPos.Quality == c.sols[flag].Quality && c.MessageNums == 1 {
+									c.AddNewBlock(&c.sols[flag])
+								}
+								break*/
+
+				addBlock := recMessage.SendPos
+				nodes := c.verifier.SelectChallenges(addBlock.Challenge)
+				if c.verifier.VerifySpace(nodes, addBlock.Answer.Hashes, addBlock.Answer.Parents, addBlock.Answer.Proofs, addBlock.Answer.PProofs) {
+					c.AddNewBlock(addBlock, addBlock.Answer)
+				} else {
+					fmt.Println("区块不符合规定")
+				}
+				break
+			}
+		case 4:
+			/*			{
+						if len(c.sols) == 10 {
+							flag := c.ReturnMinQuality()
+							if c.sols[flag].Quality > recMessage.SendPos.Quality {
+								lock.Lock()
+								c.sols[flag] = recMessage.SendPos
+								lock.Unlock()
+								sendMessage := message.NewMessage(3, "准备添加的区块", c.sols[flag], nil, 0, nil)
+								c.SendToEveryNode(sendMessage, listen)
+							}
+						} else if len(c.sols) < 10 {
+							lock.Lock()
+							c.sols = append(c.sols, recMessage.SendPos)
+							fmt.Println(recMessage.SendPos.Quality)
+							lock.Unlock()
+						}
+						break
+					}*/
 		}
 	}
 }
 
 //客户端命令行操作
 func (c *Client) OperaClient(listen *net.UDPConn) {
-	var sendData []byte
 	for {
 		var OperaName string = ""
 		fmt.Println("请输入进行的操作：")
@@ -148,62 +180,70 @@ func (c *Client) OperaClient(listen *net.UDPConn) {
 		switch OperaName {
 		case "更新区块链":
 			buffer := new([]byte)
-			sendMessage := message.NewMessage(1, "更新区块链", nil, *buffer, 0, nil)
-			sendData, err := json.Marshal(sendMessage)
-			if err != nil {
-				fmt.Println(err)
-				return
-			}
-			for i, x := range c.ClientsAddr {
-				fmt.Println("消息发送目标地址", x)
-				_, err := listen.WriteToUDP(sendData, &c.ClientsAddr[i])
-				if err != nil {
-					fmt.Println("发送消息失败，错误为", err)
-				}
-			}
+			sendMessage := message.NewMessage(1, "更新区块链", *new(block.PoS), *buffer, 0, nil)
+			c.SendToEveryNode(sendMessage, listen)
 			break
 		case "进行挖矿":
-			if len(c.sols) == 10 { //当10个解满了，选择最好的解发送出去
-				flag := 0
-				max := c.sols[0].Quality
-				for i, x := range c.sols {
-					if x.Quality < max {
-						max = c.sols[i].Quality
-						flag = i
-					}
-				}
-				sendMessage := message.NewMessage(3, "添加的区块", c.sols[flag], nil, 0, nil)
-				sendData, err := json.Marshal(sendMessage)
-				if err != nil {
-					fmt.Println(err)
-					return
-				}
-				for i, x := range c.ClientsAddr {
-					fmt.Println("消息发送目标地址", x)
-					_, err := listen.WriteToUDP(sendData, &c.ClientsAddr[i])
-					if err != nil {
-						fmt.Println("发送消息失败，错误为", err)
-					}
-				}
-			} else { //未满继续挖矿
-				fmt.Println("进行挖矿，向别的节点发送质量函数和区块，当10个解满时，选择最好的解发送，当收到一半以上节点消息时，区块上链")
+			for {
 				challenge := c.GenerateChallenge()
+				seed := make([]byte, 64)
+				rand.Read(seed)
+				challenge = append(challenge, seed...)
 				prf := c.Mine(challenge)
-				sendData, _ = json.Marshal(prf)
-				for i, x := range c.ClientsAddr {
-					fmt.Println("消息发送目标地址", x)
-					_, err := listen.WriteToUDP(sendData, &c.ClientsAddr[i])
-					if err != nil {
-						fmt.Println("发送消息失败，错误为", err)
-					}
+				if prf.Quality <= 0.0001 {
+					fmt.Println("该区块质量为：", prf.Quality)
+					c.AddNewBlock(*prf, prf.Answer)
+					sendMessage := message.NewMessage(3, "添加的区块", *prf, nil, 0, nil)
+					c.SendToEveryNode(sendMessage, listen)
 				}
 			}
-			break
+
 		case "修改区块链":
 			fmt.Println("修改区块链")
 			break
 		}
 
+	}
+}
+
+//找到客户端最小质量函数的节点编号
+/*func (c *Client) ReturnMinQuality() int {
+	flag := 0
+	max := c.sols[0].Quality
+	for i, x := range c.sols {
+		if x.Quality < max {
+			max = c.sols[i].Quality
+			flag = i
+		}
+	}
+	return flag
+}*/
+
+//向其他节点发送消息包
+func (c *Client) SendToEveryNode(sendMessage *message.Message, listen *net.UDPConn) {
+	sendData, _ := json.Marshal(sendMessage)
+	for i, x := range c.ClientsAddr {
+		fmt.Println("消息发送目标地址", x)
+		_, err := listen.WriteToUDP(sendData, &c.ClientsAddr[i])
+		if err != nil {
+			fmt.Println("发送消息失败，错误为", err)
+		}
+	}
+}
+
+//向单个节点发送消息包
+func (c *Client) SendToNode(sendMessage *message.Message, listen *net.UDPConn, addr *net.UDPAddr) {
+	sendData, err := json.Marshal(sendMessage) //类转为json
+	fmt.Println("发送信息为：", sendData)
+	fmt.Println("发送目标地址为：", addr)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	_, err = listen.WriteToUDP(sendData, addr)
+	if err != nil {
+		fmt.Println("发送消息失败，错误为", err)
 	}
 }
 
@@ -307,6 +347,24 @@ func (c *Client) GenerateChallenge() []byte {
 	}
 	challenge := sha3.Sum256(bin)
 	return challenge[:]
+}
+func (c *Client) AddNewBlock(prf block.PoS, a block.Answer) {
+	nodes := c.verifier.SelectChallenges(prf.Challenge)
+	if c.verifier.VerifySpace(nodes, a.Hashes, a.Parents, a.Proofs, a.PProofs) {
+		old, err := c.Blockchain.Read(c.Blockchain.LastBlock)
+		if err != nil {
+			panic(err)
+		}
+		// TODO: where do transactions come from??
+		b := block.NewBlock(old, prf, nil, c.sk)
+		c.Blockchain.Add(b)
+		fmt.Printf("添加区块成功,该区块hash为%v个\n", b.Hash.Hash)
+		fmt.Printf("区块签名为%v个\n", b.Sig.Tsig)
+		fmt.Printf("区块id为%v,区块信息为%v\n", b.Id, b.Trans)
+	} else {
+		fmt.Println("该区块认证失败")
+	}
+
 }
 
 // 运行一次协议的流程

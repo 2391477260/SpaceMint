@@ -12,7 +12,7 @@ func main() {
 		IP:   net.IPv4(127, 0, 0, 1),
 		Port: 30002,
 	}
-	c2 := client.NewClient(100000, 1, 30, 4, "node2Graph", myAddr)
+	c2 := client.NewClient(100000, 1, 30, 2, "node2Graph", myAddr)
 	c2.AddNodeAddr(net.UDPAddr{
 		IP:   net.IPv4(127, 0, 0, 1),
 		Port: 30001,

@@ -12,7 +12,7 @@ func main() {
 		IP:   net.IPv4(127, 0, 0, 1),
 		Port: 30001,
 	}
-	c1 := client.NewClient(100000, 1, 30, 4, "node1Graph", myAddr)
+	c1 := client.NewClient(100000, 1, 30, 1, "node1Graph", myAddr)
 	c1.AddNodeAddr(net.UDPAddr{
 		IP:   net.IPv4(127, 0, 0, 1),
 		Port: 30002,
@@ -25,5 +25,8 @@ func main() {
 	listen := c1.StartListen()
 	defer listen.Close()
 	go c1.ReceiveData(listen)
-	c1.OperaClient(listen)
+	go c1.OperaClient(listen)
+	for {
+
+	}
 }
